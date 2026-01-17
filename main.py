@@ -1,53 +1,56 @@
 import os
 import asyncio
-from telethon import TelegramClient, events
-from telethon.tl.functions.users import GetFullUserRequest
+import aiohttp
+from aiogram import Bot
 
-# Извлекаем данные из Secrets
-API_ID = int(os.environ['API_ID'])
-API_HASH = os.environ['API_HASH']
+# Конфигурация из Secrets
+TOKEN = os.environ['BOT_TOKEN']
+ADMIN_ID = os.environ['MY_ID']
+# Адрес коллекции подарков в TON (примерный, нужно уточнять актуальный)
+GIFTS_COLLECTION = "EQCA14o1-VWhS29_Z9MHLz9fTz1_uByyO08unf89Xf0-f9f9" 
 
-# Создаем клиент
-client = TelegramClient('my_parser_session', API_ID, API_HASH)
+# Настройки фильтра
+MIN_PRICE_TON = 50.0 # Находить подарки дороже 50 TON
 
-async def check_user_gifts(user_id):
-    try:
-        # Запрашиваем полную информацию о пользователе
-        full_info = await client(GetFullUserRequest(user_id))
-        
-        # Проверка наличия NFT/Звездных подарков
-        # В новых версиях API поле называется 'star_gifts'
-        if hasattr(full_info, 'star_gifts') and full_info.star_gifts:
-            return len(full_info.star_gifts.gifts) # Возвращаем кол-во подарков
-        return 0
-    except Exception:
-        return 0
+bot = Bot(token=TOKEN)
 
-@client.on(events.NewMessage(pattern='/start'))
-async def start(event):
-    await event.respond("Парсер запущен. Отправь /scan в любом чате, чтобы найти владельцев NFT.")
-
-@client.on(events.NewMessage(pattern='/scan'))
-async def scan(event):
-    chat = await event.get_chat()
-    await event.respond("🔍 Начинаю сканирование участников...")
+async def check_new_gifts():
+    last_lt = 0 # Индекс последней проверенной транзакции
     
-    found_count = 0
-    # iter_participants проходит по всем людям в группе
-    async for user in client.iter_participants(chat, limit=200): # Лимит 200 для теста
-        if user.bot: continue
-        
-        gifts_count = await check_user_gifts(user.id)
-        if gifts_count > 0:
-            found_count += 1
-            username = f"@{user.username}" if user.username else "Скрыт"
-            await event.respond(f"🎁 Нашел! {username} | Подарков: {gifts_count}")
-        
-        # Небольшая пауза, чтобы Telegram не забанил за спам запросами
-        await asyncio.sleep(1)
+    while True:
+        try:
+            # Используем TON API для получения транзакций коллекции
+            url = f"https://toncenter.com/api/v2/getTransactions?address={GIFTS_COLLECTION}&limit=10"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                    
+                    if data.get('ok'):
+                        transactions = data['result']
+                        for tx in transactions:
+                            # Логика фильтрации по цене и метаданным
+                            # В реальности здесь нужно парсить поле 'value' или 'in_msg'
+                            price = float(tx['out_msgs'][0]['value']) / 10**9 # Перевод из нано-TON
+                            
+                            if price >= MIN_PRICE_TON:
+                                gift_id = tx['transaction_id']['hash']
+                                await bot.send_message(
+                                    ADMIN_ID, 
+                                    f"🎁 Найден дорогой подарок!\n"
+                                    f"💰 Цена: {price} TON\n"
+                                    f"🔗 Ссылка: https://fragment.com/nft/{gift_id}"
+                                )
+                                
+            # Пауза между проверками, чтобы не забанили API
+            await asyncio.sleep(30) 
+            
+        except Exception as e:
+            print(f"Ошибка мониторинга: {e}")
+            await asyncio.sleep(10)
 
-    await event.respond(f"✅ Сканирование завершено. Найдено: {found_count}")
-
-print("Бот успешно запущен!")
-client.start()
-client.run_until_disconnected()
+if __name__ == '__main__':
+    print("Бот-мониторинг запущен...")
+    loop = asyncio.get_event_loop()
+    loop.create_task(check_new_gifts())
+    # Здесь можно добавить запуск обычного aiogram бота для управления настройками
